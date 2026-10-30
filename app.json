@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "Vanakkam TV",
+    "slug": "vanakkam-tv",
+    "version": "1.0.0",
+    "scheme": "vanakkamtv",
+    "orientation": "default",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "backgroundColor": "#0A0B12",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#0A0B12"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.example.vanakkamtv"
+    },
+    "android": {
+      "package": "com.example.vanakkamtv",
+      "edgeToEdgeEnabled": true
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    },
+    "plugins": ["expo-router"],
+    "experiments": {
+      "typedRoutes": false
+    }
+  }
+}

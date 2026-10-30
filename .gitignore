@@ -1,0 +1,16 @@
+node_modules/
+.expo/
+dist/
+web-build/
+*.log
+.DS_Store
+.env
+android/
+ios/
+
+# signing material
+*.keystore
+*.jks
+keystore.properties
+*.apk
+*.aab
