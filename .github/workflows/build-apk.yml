@@ -29,9 +29,8 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
+      # Runner image ships the Android SDK with pre-accepted licenses;
+      # AGP auto-installs missing platform/build-tools components.
       - name: Install JS dependencies
         run: npm ci
 
