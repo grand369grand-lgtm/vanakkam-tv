@@ -11,7 +11,7 @@ on:
 jobs:
   build-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -40,13 +40,22 @@ jobs:
           EXPO_NO_TELEMETRY: '1'
         run: npx expo prebuild --platform android --no-install
 
+      - name: Cache Gradle (wrapper + dependencies)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/build.gradle', 'android/settings.gradle', 'android/gradle/wrapper/gradle-wrapper.properties', 'android/gradle.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
       - name: Build release APK
         working-directory: android
         env:
           CI: 'true'
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon --stacktrace
+          ./gradlew assembleRelease --no-daemon --stacktrace --build-cache --parallel
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
