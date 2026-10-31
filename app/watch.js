@@ -6,7 +6,7 @@
  * "Up next" list of sibling channels from the same category.
  */
 import React, { useEffect, useMemo } from "react";
-import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -190,12 +190,12 @@ function Badge({ icon, text }) {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
   center: { alignItems: "center", justifyContent: "center", gap: 12 },
-  // Web gets rounded corners (CSS clip); on Android a rounded clipping wrapper
-  // can prevent the video surface from compositing, so we keep it square there.
+  // The WebView player renders as a normal view, so rounded corners are safe
+  // on every platform (the old native-surface clipping issue is gone).
   playerWrap: {
     marginHorizontal: 16,
     marginTop: 6,
-    borderRadius: Platform.OS === "web" ? 16 : 0,
+    borderRadius: 16,
     overflow: "hidden",
     backgroundColor: "#000",
   },

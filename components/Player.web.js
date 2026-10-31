@@ -1,15 +1,15 @@
 /**
  * Player (web)
  * ------------
- * On the web, expo-video falls back to a plain <video> element, which cannot
- * play HLS (.m3u8) in Chrome/Firefox/Edge. So the web build gets its own
- * player: hls.js for HLS streams, native <video> for MP4, plus a light
- * custom control bar (play/pause, mute, live badge, fullscreen).
+ * Same Vanakkam TV shell and the same fallback state machine as the native
+ * Player (components/Player.js + components/player/usePlayerController.js),
+ * but the video runs directly on Video.js 8 in the DOM (no WebView), with
+ * MSE/VHS on Chrome/Firefox/Edge and native HLS on Safari.
  *
- * Native iOS/Android keep using components/Player.js (expo-video), which
- * handles HLS natively.
+ * Rounded corners are applied here (pure CSS on web — the Android warning
+ * about rounded clipping only concerns native video surfaces).
  */
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -18,172 +18,89 @@ import {
   View,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import Hls from "hls.js";
+import VideoJsPlayer from "./VideoJsPlayer"; // resolves to VideoJsPlayer.web.js
+import usePlayerController from "./player/usePlayerController";
+import { PLAYER_EVENTS } from "./player/bridge";
+import { categoryLabel } from "./player/error-handler";
 import { colors } from "@/theme";
 
-export default function Player({ channel }) {
-  const videoRef = useRef(null);
-  const hlsRef = useRef(null);
-  const [state, setState] = useState("loading"); // loading | playing | paused | error
-  const [muted, setMuted] = useState(true); // browsers only autoplay muted
-  const [message, setMessage] = useState("");
+export default function Player({ channel, alternates = [] }) {
+  const playerRef = useRef(null);
+  const fullscreenRef = useRef(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
-  /* ------------------------------------------------------------ attach src */
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    setState("loading");
-    setMessage("");
+  const sendCommand = useCallback((type, payload) => {
+    playerRef.current?.send(type, payload);
+  }, []);
 
-    const isHls = channel.isHls;
+  const ctrl = usePlayerController({ channel, alternates, sendCommand });
 
-    if (isHls && Hls.isSupported()) {
-      const hls = new Hls({
-        lowLatencyMode: true,
-        enableWorker: true,
-        manifestLoadingTimeOut: 15000,
-        fragLoadingMaxRetry: 4,
-      });
-      hlsRef.current = hls;
-      hls.loadSource(channel.url);
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
-      hls.on(Hls.Events.ERROR, (_e, data) => {
-        if (data.fatal) {
-          setState("error");
-          setMessage(
-            data.type === Hls.ErrorTypes.NETWORK_ERROR
-              ? "Network/CORS error — this stream may be geo-blocked or offline."
-              : "This stream could not be decoded.",
-          );
-        }
-      });
-    } else if (isHls && video.canPlayType("application/vnd.apple.mpegurl")) {
-      // Safari plays HLS natively
-      video.src = channel.url;
-      video.play().catch(() => {});
-    } else {
-      video.src = channel.url;
-      video.play().catch(() => {});
-    }
+  const handleEvent = useCallback(
+    (event) => {
+      if (event.type === PLAYER_EVENTS.FULLSCREEN_CHANGED) {
+        fullscreenRef.current = !!event.payload?.fullscreen;
+        setIsFullscreen(fullscreenRef.current);
+      }
+      ctrl.onEvent(event);
+    },
+    [ctrl],
+  );
 
-    return () => {
-      hlsRef.current?.destroy();
-      hlsRef.current = null;
-      video.removeAttribute("src");
-      video.load?.();
-    };
-  }, [channel.url, channel.isHls]);
+  useEffect(
+    () => () => {
+      try {
+        playerRef.current?.destroy?.();
+      } catch (e) {}
+    },
+    [],
+  );
 
-  /* -------------------------------------------------------------- handlers */
-  const toggle = () => {
-    const v = videoRef.current;
-    if (!v) return;
-    if (v.paused) v.play().catch(() => {});
-    else v.pause();
-  };
-
-  const retry = () => {
-    const v = videoRef.current;
-    if (!v) return;
-    setState("loading");
-    const src = channel.url;
-    if (hlsRef.current) {
-      hlsRef.current.destroy();
-      hlsRef.current = null;
-    }
-    if (channel.isHls && Hls.isSupported()) {
-      const hls = new Hls({ lowLatencyMode: true });
-      hlsRef.current = hls;
-      hls.loadSource(src);
-      hls.attachMedia(v);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => v.play().catch(() => {}));
-      hls.on(Hls.Events.ERROR, (_e, d) => d.fatal && setState("error"));
-    } else {
-      v.src = src;
-      v.play().catch(() => {});
-    }
-  };
+  const retry = useCallback(() => ctrl.retryManual(), [ctrl]);
+  const { phase, statusNote, finalError, attempts, attemptIdx, current } = ctrl;
+  const fullOverlay = phase === "loading" && !finalError;
 
   return (
     <View style={styles.stage}>
-      {/* eslint-disable-next-line react/no-unknown-property */}
-      <video
-        ref={videoRef}
-        playsInline
-        muted={muted}
-        controls={false}
-        style={{
-          width: "100%",
-          height: "100%",
-          backgroundColor: "#000",
-          objectFit: "contain",
-        }}
-        onPlaying={() => setState("playing")}
-        onPause={() => setState("paused")}
-        onWaiting={() => setState("loading")}
-        onError={() => {
-          setState("error");
-          setMessage(
-            "Stream unavailable — public IPTV links go offline often.",
-          );
-        }}
-      />
+      <VideoJsPlayer ref={playerRef} onEvent={handleEvent} style={styles.video} />
 
-      {state === "loading" && (
+      {fullOverlay && (
         <View style={styles.center} pointerEvents="none">
           <ActivityIndicator color={colors.accent} size="large" />
-          <Text style={styles.hint}>Tuning in to {channel.name}…</Text>
+          <Text style={styles.hint}>
+            {attempts.length > 1
+              ? `Source ${attemptIdx + 1}/${attempts.length} · Connecting to ${current?.name ?? channel.name}…`
+              : `Tuning in to ${current?.name ?? channel.name}…`}
+          </Text>
+          {statusNote ? <Text style={styles.note}>{statusNote}</Text> : null}
         </View>
       )}
 
-      {state === "error" && (
+      {phase === "buffering" && (
+        <View style={styles.bufferChip} pointerEvents="none">
+          <ActivityIndicator color={colors.accent} size="small" />
+          <Text style={styles.bufferText}>{statusNote || "Buffering…"}</Text>
+        </View>
+      )}
+
+      {finalError && (
         <View style={styles.center}>
           <Ionicons name="warning-outline" size={26} color={colors.danger} />
           <Text style={styles.errorTitle}>Stream not available</Text>
-          <Text style={styles.hint}>{message || "Try another channel."}</Text>
+          <Text style={styles.hint}>{finalError.friendly}</Text>
+          {attempts.length > 1 && (
+            <Text style={styles.note}>
+              Tried {attempts.length} source{attempts.length > 1 ? "s" : ""} for this
+              channel ({categoryLabel(finalError.category)}). Public IPTV links change
+              daily — pick another channel if this one stays down.
+            </Text>
+          )}
           <Pressable onPress={retry} style={styles.retry}>
             <Text style={styles.retryText}>Retry</Text>
           </Pressable>
         </View>
       )}
 
-      {/* control bar */}
-      <View style={styles.controls} pointerEvents="box-none">
-        <Pressable onPress={toggle} style={styles.ctrlBtn}>
-          <Ionicons
-            name={state === "playing" ? "pause" : "play"}
-            size={18}
-            color="#fff"
-          />
-        </Pressable>
-        <Pressable
-          onPress={() => {
-            const v = videoRef.current;
-            if (!v) return;
-            v.muted = !muted;
-            setMuted(!muted);
-          }}
-          style={styles.ctrlBtn}
-        >
-          <Ionicons
-            name={muted ? "volume-mute" : "volume-high"}
-            size={18}
-            color="#fff"
-          />
-        </Pressable>
-        <View style={styles.live}>
-          <View style={styles.liveDot} />
-          <Text style={styles.liveText}>LIVE</Text>
-        </View>
-        <View style={{ flex: 1 }} />
-        <Pressable
-          onPress={() => videoRef.current?.requestFullscreen?.()}
-          style={styles.ctrlBtn}
-        >
-          <Ionicons name="expand" size={18} color="#fff" />
-        </Pressable>
-      </View>
+      {isFullscreen ? null : null}
     </View>
   );
 }
@@ -197,13 +114,14 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     justifyContent: "center",
   },
+  video: { ...StyleSheet.absoluteFillObject },
   center: {
     ...StyleSheet.absoluteFillObject,
     alignItems: "center",
     justifyContent: "center",
     padding: 24,
-    gap: 8,
-    backgroundColor: "rgba(0,0,0,0.55)",
+    gap: 10,
+    backgroundColor: "rgba(0,0,0,0.6)",
   },
   hint: {
     color: colors.textMuted,
@@ -211,53 +129,35 @@ const styles = StyleSheet.create({
     textAlign: "center",
     lineHeight: 18,
   },
-  errorTitle: { color: colors.text, fontSize: 15, fontWeight: "800" },
-  retry: {
-    marginTop: 6,
-    paddingHorizontal: 18,
-    paddingVertical: 9,
-    borderRadius: 999,
-    backgroundColor: colors.accent,
+  note: {
+    color: colors.textFaint,
+    fontSize: 11.5,
+    textAlign: "center",
+    lineHeight: 16,
+    maxWidth: "92%",
   },
-  retryText: { color: "#12141F", fontWeight: "800", fontSize: 12.5 },
-  controls: {
+  bufferChip: {
     position: "absolute",
-    left: 10,
+    top: 10,
     right: 10,
-    bottom: 10,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-  },
-  ctrlBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(10,11,18,0.66)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
-  },
-  live: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-    paddingHorizontal: 9,
-    paddingVertical: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
     borderRadius: 999,
-    backgroundColor: "rgba(255,59,92,0.18)",
+    backgroundColor: "rgba(10,11,18,0.72)",
+    borderWidth: 1,
+    borderColor: colors.border,
   },
-  liveDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: colors.live,
+  bufferText: { color: colors.textMuted, fontSize: 11.5 },
+  errorTitle: { color: colors.text, fontSize: 16, fontWeight: "700" },
+  retry: {
+    marginTop: 6,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: colors.accent,
   },
-  liveText: {
-    color: colors.live,
-    fontSize: 9.5,
-    fontWeight: "900",
-    letterSpacing: 1,
-  },
+  retryText: { color: "#12141F", fontWeight: "800", fontSize: 13 },
 });

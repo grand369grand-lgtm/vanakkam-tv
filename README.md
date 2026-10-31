@@ -31,8 +31,8 @@ list is always current.
   de-duplicated and sorted
 - 🔎 **Instant search** across every loaded channel (name, category, tvg-id)
 - ⭐ **Favourites + recently watched**, persisted with AsyncStorage
-- 🎬 **Real HLS playback** — `expo-video` on native, `hls.js` on web (Chrome/Firefox can't
-  play `.m3u8` natively)
+- 🎬 **Real HLS playback** — Video.js 8 + VHS in a React Native WebView on native,
+  Video.js 8 directly in the DOM on web (Chrome/Firefox can't play `.m3u8` natively)
 - 🧩 **Graceful failures** — per-stream retry UI, per-playlist error reporting, short
   auto-retry loop while a stream connects
 - 🎨 **Clean UI** — dark "night cinema" palette, marigold accent, auto-generated monogram
@@ -52,8 +52,11 @@ vanakkam-tv/
 │   │   └── settings.js     # Playlist picker (the source of truth)
 │   └── watch.js            # Player screen + "up next"
 ├── components/
-│   ├── Player.js           # native player (expo-video)
-│   ├── Player.web.js       # web player (hls.js + <video> + custom controls)
+│   ├── Player.js           # native player shell (WebView + Video.js 8 + fallback)
+│   ├── Player.web.js       # web player shell (Video.js 8 in DOM + same fallback)
+│   ├── VideoJsPlayer.js    # native WebView container + RN<->Video.js bridge
+│   ├── VideoJsPlayer.web.js# web Video.js 8 container (same bridge protocol)
+│   ├── player/             # shared player modules (bridge, errors, WebView page)
 │   ├── ChannelCard.js
 │   ├── ChannelLogo.js      # monogram fallback
 │   ├── CategoryChips.js
@@ -118,7 +121,7 @@ lib/m3u.js  ──►  Channel objects { name, url, logo, categories, quality, i
 store/AppContext.js  ──►  dedupe + sort + merge across playlists
         │
         ▼
-Live / Search / Favourites  ──►  /watch  ──►  Player (expo-video | hls.js)
+Live / Search / Favourites  ──►  /watch  ──►  Player (Video.js 8: WebView native | DOM web)
 ```
 
 ## Good to know

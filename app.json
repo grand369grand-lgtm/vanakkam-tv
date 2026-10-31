@@ -2,7 +2,7 @@
   "expo": {
     "name": "Vanakkam TV",
     "slug": "vanakkam-tv",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "scheme": "vanakkamtv",
     "orientation": "default",
     "userInterfaceStyle": "dark",
@@ -19,7 +19,7 @@
     "android": {
       "package": "com.example.vanakkamtv",
       "edgeToEdgeEnabled": true,
-      "versionCode": 2
+      "versionCode": 3
     },
     "web": {
       "bundler": "metro",

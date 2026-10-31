@@ -1,245 +1,132 @@
 /**
  * Player (native: iOS / Android)
  * ------------------------------
- * Thin wrapper around expo-video's <VideoView> with what a live IPTV app needs:
- * loading state, retryable error state, autoplay, native controls
- * (fullscreen / PiP where the platform supports it).
+ * Vanakkam TV player shell on top of the WebView + Video.js 8 stack.
  *
- * Playback resilience (why free IPTV links die):
- *   1. Many iptv-org servers have broken HTTPS (expired cert, bad cipher,
- *      TLS 1.0 only) -> ExoPlayer throws SSLHandshakeException.
- *   2. Many streams are plain HTTP (blocked on Android unless cleartext is
- *      allowed — enabled in app.json).
- *   3. Public links change or die daily.
- *
- * So the player never gives up on the first failure: it walks an ordered
- * attempt list — [original url, http twin of original, mirror 1, http twin of
- * mirror 1, ...] — and only shows a hard error after every attempt failed.
- * The inner component is keyed on the attempt url, so switching attempts
- * always builds a fresh native player instead of reusing a broken one.
+ * Responsibilities:
+ *  - render <VideoJsPlayer> (one persistent WebView, sources switched in-place)
+ *  - run the shared fallback state machine (components/player/usePlayerController):
+ *    on failure, try the next authorized source of the SAME channel; never
+ *    auto-downgrade HTTPS; never hammer permanently-dead sources
+ *  - show Vanakkam TV dark-cinema overlays: connecting spinner, buffering,
+ *    LIVE status (inside page), honest error screens with a Retry button
+ *  - Android hardware back: exit in-page fullscreen first, then navigate
+ *  - release the native player (PLAYER_DESTROYED) when unmounting
  */
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  BackHandler,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from "react-native";
-import { useVideoPlayer, VideoView } from "expo-video";
+import { Ionicons } from "@expo/vector-icons";
+import VideoJsPlayer from "./VideoJsPlayer";
+import usePlayerController from "./player/usePlayerController";
+import { PLAYER_EVENTS } from "./player/bridge";
+import { categoryLabel } from "./player/error-handler";
 import { colors } from "@/theme";
 
-const PER_ATTEMPT_TIMEOUT_MS = 12000; // live HLS should respond much faster than this
-const MAX_ATTEMPTS = 5;
+export default function Player({ channel, alternates = [] }) {
+  const playerRef = useRef(null);
+  const fullscreenRef = useRef(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
-/** Translate low-level ExoPlayer errors into something a human can act on. */
-export function friendlyError(msg = "") {
-  const m = String(msg);
-  if (/ssl|handshake|certificate|trust anchor|protocol error/i.test(m))
-    return "The stream server's HTTPS certificate is broken — this is a problem with the stream, not your device.";
-  if (/cleartext/i.test(m))
-    return "This stream is plain HTTP and was blocked by the system.";
-  if (/unable to connect|unknownhost|econnrefused|timed?\s?out|timeout/i.test(m))
-    return "The stream server did not respond — it may be offline or geo-blocked.";
-  if (/403|401|forbidden|unauthorized/i.test(m))
-    return "The server refused the player (403) — the stream needs special access.";
-  if (/404|not found|filenotfound/i.test(m))
-    return "This stream link is dead (404) — links change daily.";
-  if (/invalid|malformed|parse/i.test(m))
-    return "The stream returned data we couldn't decode.";
-  return m;
-}
+  /** Commands from the controller go into the WebView player. */
+  const sendCommand = useCallback((type, payload) => {
+    playerRef.current?.send(type, payload);
+  }, []);
 
-/**
- * Build the ordered attempt list for a channel.
- * Alternates are other entries of the same channel (same tvg-id / name) found
- * across the loaded playlists — different servers hosting the same channel.
- */
-export function buildAttempts(channel, alternates = []) {
-  const httpTwin = (url) =>
-    /^https:\/\//i.test(url) ? url.replace(/^https:\/\//i, "http://") : null;
+  const ctrl = usePlayerController({ channel, alternates, sendCommand });
 
-  const candidates = [channel];
-  for (const alt of alternates) {
-    if (candidates.length >= MAX_ATTEMPTS) break;
-    if (alt?.url && alt.url !== channel.url) candidates.push(alt);
-  }
-
-  const out = [];
-  const seen = new Set();
-  for (const c of candidates) {
-    // Original first…
-    if (!seen.has(c.url)) {
-      out.push(c);
-      seen.add(c.url);
-    }
-    // …then its plain-HTTP twin (fixes broken-SSL servers that also serve :80).
-    const twin = httpTwin(c.url);
-    if (twin && !seen.has(twin) && out.length < MAX_ATTEMPTS) {
-      out.push({ ...c, url: twin, viaCleartext: true });
-      seen.add(twin);
-    }
-  }
-  return out.slice(0, MAX_ATTEMPTS);
-}
-
-function PlayerInner({ channel, attemptLabel, onFatal }) {
-  const [status, setStatus] = useState("loading"); // loading | ready | error
-  const [message, setMessage] = useState("");
-  const reported = useRef(false);
-
-  const player = useVideoPlayer(
-    {
-      uri: channel.url,
-      // Some IPTV CDNs only answer when the player sends a browser-ish UA.
-      headers: {
-        ...(channel.userAgent ? { "User-Agent": channel.userAgent } : {}),
-        ...(channel.referrer ? { Referer: channel.referrer } : {}),
-      },
+  /** Intercept bridge events we need locally, then feed the controller. */
+  const handleEvent = useCallback(
+    (event) => {
+      if (event.type === PLAYER_EVENTS.FULLSCREEN_CHANGED) {
+        fullscreenRef.current = !!event.payload?.fullscreen;
+        setIsFullscreen(fullscreenRef.current);
+      }
+      ctrl.onEvent(event);
     },
-    (p) => {
-      p.loop = false;
-      p.play();
-    },
+    [ctrl],
   );
 
+  // Release the native player when leaving the screen.
+  useEffect(
+    () => () => {
+      try {
+        playerRef.current?.destroy?.();
+      } catch (e) {}
+    },
+    [],
+  );
+
+  // Android hardware back: first exit fullscreen, otherwise navigate back.
   useEffect(() => {
-    reported.current = false;
-    const fail = (msg) => {
-      if (reported.current) return;
-      reported.current = true;
-      setStatus("error");
-      setMessage(msg);
-      onFatal?.(msg);
-    };
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      if (fullscreenRef.current) {
+        playerRef.current?.send("EXIT_FULLSCREEN");
+        return true;
+      }
+      return false;
+    });
+    return () => sub.remove();
+  }, []);
 
-    const subs = [
-      player.addListener("statusChange", (e) => {
-        if (e.status === "readyToPlay") setStatus("ready");
-        if (e.status === "error") fail(e.error?.message || "Stream unavailable");
-      }),
-    ];
-
-    // Live HLS often buffers for a while before it reports ready — give up
-    // per attempt so the next one (mirror / cleartext twin) gets its shot.
-    const watchdog = setTimeout(() => {
-      setStatus((s) => {
-        if (s !== "loading") return s;
-        fail(`No response after ${PER_ATTEMPT_TIMEOUT_MS / 1000}s`);
-        return "error";
-      });
-    }, PER_ATTEMPT_TIMEOUT_MS);
-
-    return () => {
-      clearTimeout(watchdog);
-      subs.forEach((s) => s?.remove?.());
-    };
-  }, [player, onFatal]);
+  const retry = useCallback(() => ctrl.retryManual(), [ctrl]);
+  const { phase, statusNote, finalError, attempts, attemptIdx, current } = ctrl;
+  const showLoading = phase === "loading" || phase === "buffering";
+  const fullOverlay = phase === "loading" && !finalError;
 
   return (
     <View style={styles.stage}>
-      <VideoView
-        player={player}
-        style={styles.video}
-        nativeControls
-        contentFit="contain"
-        allowsFullscreen
-        allowsPictureInPicture
-      />
+      <VideoJsPlayer ref={playerRef} onEvent={handleEvent} style={styles.video} />
 
-      {status === "loading" && (
+      {/* connecting / switching source */}
+      {fullOverlay && (
         <View style={styles.center} pointerEvents="none">
           <ActivityIndicator color={colors.accent} size="large" />
-          <Text style={styles.hint}>Connecting to {channel.name}…</Text>
-          {attemptLabel ? <Text style={styles.attempt}>{attemptLabel}</Text> : null}
-        </View>
-      )}
-
-      {status === "error" && (
-        <View style={styles.center} pointerEvents="none">
-          <Text style={styles.hint}>{friendlyError(message)}</Text>
-        </View>
-      )}
-    </View>
-  );
-}
-
-export default function Player({ channel, alternates = [], onError }) {
-  const attempts = useMemo(
-    () => buildAttempts(channel, alternates),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [channel.id, channel.url, alternates.length],
-  );
-
-  const [attempt, setAttempt] = useState(0);
-  const attemptRef = useRef(0);
-  const [finalError, setFinalError] = useState("");
-
-  // Reset the whole chain when the channel changes (outer key already forces
-  // remount, but keep this as a safety net).
-  useEffect(() => {
-    attemptRef.current = 0;
-    setAttempt(0);
-    setFinalError("");
-  }, [channel.id]);
-
-  const handleFatal = useCallback(
-    (msg) => {
-      onError?.(msg);
-      const idx = attemptRef.current;
-      if (idx + 1 < attempts.length) {
-        // Brief pause so the user can see what happened before we switch.
-        setTimeout(() => {
-          attemptRef.current = idx + 1;
-          setAttempt(idx + 1);
-        }, 900);
-      } else {
-        setFinalError(msg || "Stream unavailable");
-      }
-    },
-    [attempts.length, onError],
-  );
-
-  const retryAll = useCallback(() => {
-    attemptRef.current = 0;
-    setFinalError("");
-    setAttempt(0);
-  }, []);
-
-  if (finalError) {
-    return (
-      <View style={styles.stage}>
-        <View style={styles.center}>
-          <Text style={styles.errorTitle}>Stream not available</Text>
           <Text style={styles.hint}>
-            {friendlyError(finalError)}
-            {"\n"}Tried {attempts.length} source{attempts.length > 1 ? "s" : ""} —
-            this public link may be offline or geo-blocked. Try another channel;
-            links change daily.
+            {attempts.length > 1
+              ? `Source ${attemptIdx + 1}/${attempts.length} · Connecting to ${current?.name ?? channel.name}…`
+              : `Connecting to ${current?.name ?? channel.name}…`}
           </Text>
-          <Pressable onPress={retryAll} style={styles.retry}>
+          {statusNote ? <Text style={styles.note}>{statusNote}</Text> : null}
+        </View>
+      )}
+
+      {/* buffering while already playing: small chip, video stays visible */}
+      {phase === "buffering" && (
+        <View style={styles.bufferChip} pointerEvents="none">
+          <ActivityIndicator color={colors.accent} size="small" />
+          <Text style={styles.bufferText}>{statusNote || "Buffering…"}</Text>
+        </View>
+      )}
+
+      {/* final error after every authorized source failed */}
+      {finalError && (
+        <View style={styles.center}>
+          <Ionicons name="warning-outline" size={26} color={colors.danger} />
+          <Text style={styles.errorTitle}>Stream not available</Text>
+          <Text style={styles.hint}>{finalError.friendly}</Text>
+          {attempts.length > 1 && (
+            <Text style={styles.note}>
+              Tried {attempts.length} source{attempts.length > 1 ? "s" : ""} for this
+              channel ({categoryLabel(finalError.category)}). Public IPTV links change
+              daily — pick another channel if this one stays down.
+            </Text>
+          )}
+          <Pressable onPress={retry} style={styles.retry}>
             <Text style={styles.retryText}>Retry</Text>
           </Pressable>
         </View>
-      </View>
-    );
-  }
+      )}
 
-  const current = attempts[attempt] || channel;
-  const label =
-    attempt === 0
-      ? ""
-      : current.viaCleartext
-        ? `Retrying without HTTPS (${attempt + 1}/${attempts.length})`
-        : `Trying mirror ${attempt}/${attempts.length - 1}`;
-
-  return (
-    <PlayerInner
-      key={current.url}
-      channel={current}
-      attemptLabel={label}
-      onFatal={handleFatal}
-    />
+      {/* subtle live hint in normal mode is rendered inside the page controls */}
+      {isFullscreen && !finalError && !fullOverlay ? null : null}
+    </View>
   );
 }
 
@@ -249,8 +136,9 @@ const styles = StyleSheet.create({
     aspectRatio: 16 / 9,
     backgroundColor: "#000",
     justifyContent: "center",
+    overflow: "hidden",
   },
-  video: { width: "100%", height: "100%" },
+  video: { ...StyleSheet.absoluteFillObject },
   center: {
     ...StyleSheet.absoluteFillObject,
     alignItems: "center",
@@ -265,11 +153,28 @@ const styles = StyleSheet.create({
     textAlign: "center",
     lineHeight: 18,
   },
-  attempt: {
-    color: colors.textFaint || colors.textMuted,
-    fontSize: 11,
-    opacity: 0.8,
+  note: {
+    color: colors.textFaint,
+    fontSize: 11.5,
+    textAlign: "center",
+    lineHeight: 16,
+    maxWidth: "92%",
   },
+  bufferChip: {
+    position: "absolute",
+    top: 10,
+    right: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 999,
+    backgroundColor: "rgba(10,11,18,0.72)",
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  bufferText: { color: colors.textMuted, fontSize: 11.5 },
   errorTitle: { color: colors.text, fontSize: 16, fontWeight: "700" },
   retry: {
     marginTop: 6,
