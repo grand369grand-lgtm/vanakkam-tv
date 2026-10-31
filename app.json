@@ -2,7 +2,7 @@
   "expo": {
     "name": "Vanakkam TV",
     "slug": "vanakkam-tv",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "scheme": "vanakkamtv",
     "orientation": "default",
     "userInterfaceStyle": "dark",
@@ -18,13 +18,24 @@
     },
     "android": {
       "package": "com.example.vanakkamtv",
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "versionCode": 2
     },
     "web": {
       "bundler": "metro",
       "output": "single"
     },
-    "plugins": ["expo-router"],
+    "plugins": [
+      "expo-router",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ],
     "experiments": {
       "typedRoutes": false
     }

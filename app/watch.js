@@ -16,6 +16,11 @@ import ChannelLogo from "@/components/ChannelLogo";
 import { useApp } from "@/store/AppContext";
 import { colors, radius } from "@/theme";
 
+/** Loose channel-name key so "Sun TV (1080p)" matches "Sun TV 720p" etc. */
+function normalizeName(s = "") {
+  return s.toLowerCase().replace(/\(.*?\)/g, "").replace(/[^a-z0-9]/g, "");
+}
+
 export default function WatchScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -51,6 +56,22 @@ export default function WatchScreen() {
       .filter((c, i, arr) => arr.findIndex((x) => x.id === c.id) === i)
       .slice(0, 12);
   }, [channel, channels, recent]);
+
+  // Alternate feeds of the SAME channel (same tvg-id or same name) found in
+  // any loaded playlist. The player falls back to these automatically when
+  // the primary link fails (broken SSL, dead link, geo-block…).
+  const alternates = useMemo(() => {
+    if (!channel) return [];
+    const key = normalizeName(channel.name);
+    return channels
+      .filter((c) => c.id !== channel.id && c.url !== channel.url)
+      .filter(
+        (c) =>
+          (channel.tvgId && c.tvgId && c.tvgId === channel.tvgId) ||
+          (key && normalizeName(c.name) === key),
+      )
+      .slice(0, 2);
+  }, [channel, channels]);
 
   if (!channel) {
     return (
@@ -101,7 +122,7 @@ export default function WatchScreen() {
         </View>
 
         <View style={styles.playerWrap}>
-          <Player channel={channel} />
+          <Player channel={channel} alternates={alternates} />
         </View>
 
         <View style={styles.meta}>
